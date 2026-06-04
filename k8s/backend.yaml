@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wedding-backend
+  namespace: livekit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wedding-backend
+  template:
+    metadata:
+      labels:
+        app: wedding-backend
+    spec:
+      containers:
+        - name: backend
+          image: wedding-backend:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: wedding-secret
+          env:
+            - name: YANDEX_FOLDER
+              value: /wedding/photos
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Имя "backend" должно совпадать с proxy_pass в nginx.conf фронтенда
+  name: backend
+  namespace: livekit
+spec:
+  selector:
+    app: wedding-backend
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
