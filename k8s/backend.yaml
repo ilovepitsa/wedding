@@ -25,6 +25,11 @@ spec:
           env:
             - name: YANDEX_FOLDER
               value: /wedding/photos
+            - name: LOG_FILE
+              value: /app/logs/backend.log
+          volumeMounts:
+            - name: logs
+              mountPath: /app/logs
           readinessProbe:
             httpGet:
               path: /health
@@ -44,6 +49,9 @@ spec:
             limits:
               cpu: 500m
               memory: 1200Mi
+      volumes:
+        - name: logs
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
