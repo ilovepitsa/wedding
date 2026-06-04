@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const maxFileSize = 50 << 20
+const maxFileSize = 1 << 30
 
 var allowedMIMEs = map[string]bool{
 	"image/jpeg": true,
@@ -32,7 +32,7 @@ var allowedExts = map[string]bool{
 	".heif": true,
 }
 
-var httpClient = &http.Client{Timeout: 120 * time.Second}
+var httpClient = &http.Client{Timeout: 600 * time.Second}
 
 // tokens is nil in mock mode (YANDEX_API_BASE is set).
 var tokens *TokenManager
@@ -170,7 +170,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxFileSize)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		jsonError(w, "Файл слишком большой (макс. 50 МБ)", http.StatusBadRequest)
+		jsonError(w, "Файл слишком большой (макс. 1 ГБ)", http.StatusBadRequest)
 		return
 	}
 
