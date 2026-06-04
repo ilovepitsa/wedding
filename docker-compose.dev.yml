@@ -1,0 +1,16 @@
+services:
+  mockdisk:
+    build:
+      context: ./backend
+      dockerfile: mockdisk/Dockerfile
+    expose:
+      - "9999"
+    volumes:
+      - ./uploads:/app/uploads
+
+  backend:
+    environment:
+      YANDEX_API_BASE: http://mockdisk:9999/v1/disk
+      YANDEX_FOLDER: /wedding/photos
+    depends_on:
+      - mockdisk
