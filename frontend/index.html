@@ -197,6 +197,72 @@
       line-height: 1.55;
     }
 
+    .file-list {
+      margin-top: 24px;
+      text-align: left;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .file-list:empty {
+      margin-top: 0;
+    }
+
+    .file-row {
+      font-size: 0.82rem;
+    }
+
+    .file-row .file-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+
+    .file-row .file-name {
+      color: #6b4a39;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+
+    .file-row .file-state {
+      flex-shrink: 0;
+      font-size: 0.76rem;
+      color: #9c7565;
+    }
+
+    .file-row .file-state.success {
+      color: #5e8f5a;
+    }
+
+    .file-row .file-state.error {
+      color: #b84a40;
+    }
+
+    .file-row .bar {
+      height: 6px;
+      border-radius: 6px;
+      background: rgba(196, 149, 106, 0.18);
+      overflow: hidden;
+    }
+
+    .file-row .bar > span {
+      display: block;
+      height: 100%;
+      width: 0%;
+      border-radius: 6px;
+      background: linear-gradient(90deg, #c8896a, #a86248);
+      transition: width 0.2s ease;
+    }
+
+    .file-row.is-error .bar > span {
+      background: #d99;
+    }
+
     @media (max-width: 480px) {
       .card {
         padding: 44px 28px 36px;
@@ -213,7 +279,7 @@
     <div class="flowers">✿ ✦ ✿</div>
 
     <h1>Поделитесь<br><em>воспоминаниями</em></h1>
-    <p class="subtitle">Загрузите ваше фото с&nbsp;нашего праздника — оно попадёт в&nbsp;общую галерею</p>
+    <p class="subtitle">Загрузите ваши фото и&nbsp;видео с&nbsp;нашего праздника — они попадут в&nbsp;общую галерею</p>
 
     <div class="divider"><div class="divider-diamond"></div></div>
 
@@ -228,50 +294,124 @@
         Поделиться фото
       </button>
 
-      <input type="file" id="fileInput" accept="image/*">
+      <input type="file" id="fileInput" accept="image/*,video/*" multiple>
     </div>
 
     <div class="status" id="status"></div>
 
-    <p class="note">Фото сохраняются в&nbsp;нашей закрытой галерее&nbsp;💕</p>
+    <div class="file-list" id="fileList"></div>
+
+    <p class="note">Фото и&nbsp;видео сохраняются в&nbsp;нашей закрытой галерее&nbsp;💕</p>
   </div>
 
   <script>
     const btn = document.getElementById('uploadBtn');
     const input = document.getElementById('fileInput');
     const status = document.getElementById('status');
+    const fileList = document.getElementById('fileList');
+
+    const CONCURRENCY = 3;
 
     btn.addEventListener('click', () => input.click());
 
-    input.addEventListener('change', async () => {
-      const file = input.files[0];
-      if (!file) return;
+    input.addEventListener('change', () => {
+      const files = Array.from(input.files);
       input.value = '';
+      if (!files.length) return;
+      uploadAll(files);
+    });
 
+    function addRow(file) {
+      const row = document.createElement('div');
+      row.className = 'file-row';
+      row.innerHTML =
+        '<div class="file-head">' +
+          '<span class="file-name"></span>' +
+          '<span class="file-state">в очереди…</span>' +
+        '</div>' +
+        '<div class="bar"><span></span></div>';
+      row.querySelector('.file-name').textContent = file.name;
+      fileList.appendChild(row);
+      return {
+        bar: row.querySelector('.bar > span'),
+        state: row.querySelector('.file-state'),
+        row,
+      };
+    }
+
+    function uploadOne(file, ui) {
+      return new Promise((resolve) => {
+        ui.state.textContent = 'загрузка…';
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload?name=' + encodeURIComponent(file.name));
+        if (file.type) xhr.setRequestHeader('Content-Type', file.type);
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            ui.bar.style.width = Math.round((e.loaded / e.total) * 100) + '%';
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            ui.bar.style.width = '100%';
+            ui.state.textContent = '✓ готово';
+            ui.state.className = 'file-state success';
+            resolve(true);
+          } else {
+            let msg = 'ошибка';
+            try { msg = JSON.parse(xhr.responseText).error || msg; } catch {}
+            ui.row.classList.add('is-error');
+            ui.state.textContent = '✗ ' + msg;
+            ui.state.className = 'file-state error';
+            resolve(false);
+          }
+        };
+        xhr.onerror = () => {
+          ui.row.classList.add('is-error');
+          ui.state.textContent = '✗ нет соединения';
+          ui.state.className = 'file-state error';
+          resolve(false);
+        };
+
+        xhr.send(file);
+      });
+    }
+
+    async function uploadAll(files) {
       btn.disabled = true;
       status.className = 'status loading';
-      status.innerHTML = '<span class="spinner"></span>Загружаем фото…';
+      status.innerHTML = '<span class="spinner"></span>Загружаем файлы…';
+      fileList.innerHTML = '';
 
-      const form = new FormData();
-      form.append('photo', file);
+      const jobs = files.map((file) => ({ file, ui: addRow(file) }));
+      let done = 0, ok = 0;
 
-      try {
-        const res = await fetch('/api/upload', { method: 'POST', body: form });
-        if (res.ok) {
-          status.className = 'status success';
-          status.textContent = '✓ Фото сохранено, спасибо! 💕';
-        } else {
-          const data = await res.json().catch(() => ({}));
-          status.className = 'status error';
-          status.textContent = '✗ ' + (data.error || 'Ошибка загрузки, попробуйте ещё раз');
+      const queue = jobs.slice();
+      async function worker() {
+        while (queue.length) {
+          const job = queue.shift();
+          const success = await uploadOne(job.file, job.ui);
+          done++;
+          if (success) ok++;
+          status.innerHTML = '<span class="spinner"></span>Загружено ' + done + ' из ' + jobs.length + '…';
         }
-      } catch {
-        status.className = 'status error';
-        status.textContent = '✗ Нет соединения с сервером';
-      } finally {
-        btn.disabled = false;
       }
-    });
+
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, worker)
+      );
+
+      const failed = jobs.length - ok;
+      if (failed === 0) {
+        status.className = 'status success';
+        status.textContent = '✓ Загружено ' + ok + ' из ' + jobs.length + ', спасибо! 💕';
+      } else {
+        status.className = 'status error';
+        status.textContent = 'Загружено ' + ok + ' из ' + jobs.length + ', не удалось: ' + failed;
+      }
+      btn.disabled = false;
+    }
   </script>
 </body>
 </html>

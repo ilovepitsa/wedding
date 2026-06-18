@@ -14,25 +14,45 @@ import (
 	"time"
 )
 
-const maxFileSize = 1 << 30
-
 var allowedMIMEs = map[string]bool{
-	"image/jpeg": true,
-	"image/png":  true,
-	"image/webp": true,
-	"image/gif":  true,
+	"image/jpeg":       true,
+	"image/png":        true,
+	"image/webp":       true,
+	"image/gif":        true,
+	"video/mp4":        true,
+	"video/quicktime":  true,
+	"video/webm":       true,
+	"video/3gpp":       true,
+	"video/x-msvideo":  true,
+	"video/x-matroska": true,
 }
 
 var allowedExts = map[string]bool{
+	// изображения
 	".jpg":  true,
 	".jpeg": true,
 	".png":  true,
 	".webp": true,
+	".gif":  true,
 	".heic": true,
 	".heif": true,
+	// видео с телефонов (iPhone .mov/HEVC, Android/прочие .mp4/.3gp и т.п.)
+	".mov":  true,
+	".mp4":  true,
+	".m4v":  true,
+	".3gp":  true,
+	".3g2":  true,
+	".avi":  true,
+	".mkv":  true,
+	".webm": true,
+	".hevc": true,
+	".mts":  true,
+	".m2ts": true,
+	".wmv":  true,
+	".flv":  true,
 }
 
-var httpClient = &http.Client{Timeout: 600 * time.Second}
+var httpClient = &http.Client{Timeout: 3600 * time.Second}
 
 // tokens is nil in mock mode (YANDEX_API_BASE is set).
 var tokens *TokenManager
@@ -188,30 +208,28 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	defer r.Body.Close()
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxFileSize)
-	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		jsonError(w, "Файл слишком большой (макс. 1 ГБ)", http.StatusBadRequest)
+	origName := r.URL.Query().Get("name")
+	if strings.TrimSpace(origName) == "" {
+		jsonError(w, "Параметр «name» обязателен", http.StatusBadRequest)
 		return
 	}
 
-	file, header, err := r.FormFile("photo")
-	if err != nil {
-		jsonError(w, "Поле «photo» обязательно", http.StatusBadRequest)
+	// Sniff first 512 bytes for content-type detection, then stream the rest
+	// straight to Yandex — the file is never fully buffered in RAM or on disk.
+	sniff := make([]byte, 512)
+	n, err := io.ReadFull(r.Body, sniff)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		jsonError(w, "Ошибка чтения файла", http.StatusBadRequest)
 		return
 	}
-	defer file.Close()
+	sniff = sniff[:n]
 
-	data, err := io.ReadAll(io.LimitReader(file, maxFileSize+1))
-	if err != nil {
-		jsonError(w, "Ошибка чтения файла", http.StatusInternalServerError)
-		return
-	}
-
-	mime := http.DetectContentType(data)
-	ext := strings.ToLower(filepath.Ext(header.Filename))
+	mime := http.DetectContentType(sniff)
+	ext := strings.ToLower(filepath.Ext(origName))
 	if !allowedMIMEs[mime] && !allowedExts[ext] {
-		jsonError(w, "Разрешены только изображения (JPEG, PNG, WEBP, HEIC)", http.StatusBadRequest)
+		jsonError(w, "Разрешены только изображения и видео", http.StatusBadRequest)
 		return
 	}
 
@@ -226,7 +244,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	folder := strings.TrimRight(getEnv("YANDEX_FOLDER", "/wedding/photos"), "/")
-	filename := fmt.Sprintf("%d_%s", time.Now().UnixNano(), sanitize(header.Filename))
+	filename := fmt.Sprintf("%d_%s", time.Now().UnixNano(), sanitize(origName))
 	remotePath := folder + "/" + filename
 
 	uploadURL, err := getYandexUploadURL(token, remotePath)
@@ -236,13 +254,20 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := putToYandex(uploadURL, data, mime); err != nil {
+	// size is the full request body: sniffed prefix + remaining stream.
+	var size int64 = -1
+	if r.ContentLength > 0 {
+		size = r.ContentLength
+	}
+	body := io.MultiReader(bytes.NewReader(sniff), r.Body)
+
+	if err := putToYandex(uploadURL, body, size, mime); err != nil {
 		log.Printf("yd put: %v", err)
 		jsonError(w, "Ошибка загрузки на Яндекс.Диск", http.StatusBadGateway)
 		return
 	}
 
-	log.Printf("uploaded %s (%d bytes)", remotePath, len(data))
+	log.Printf("uploaded %s (%d bytes)", remotePath, size)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
@@ -278,12 +303,12 @@ func getYandexUploadURL(token, path string) (string, error) {
 	return result.Href, nil
 }
 
-func putToYandex(uploadURL string, data []byte, contentType string) error {
-	req, err := http.NewRequest(http.MethodPut, uploadURL, bytes.NewReader(data))
+func putToYandex(uploadURL string, body io.Reader, size int64, contentType string) error {
+	req, err := http.NewRequest(http.MethodPut, uploadURL, body)
 	if err != nil {
 		return err
 	}
-	req.ContentLength = int64(len(data))
+	req.ContentLength = size
 	req.Header.Set("Content-Type", contentType)
 
 	resp, err := httpClient.Do(req)
