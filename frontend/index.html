@@ -175,6 +175,17 @@
       color: #b84a40;
     }
 
+    .wake-indicator {
+      margin-top: 6px;
+      font-size: 0.72rem;
+      line-height: 1.4;
+      opacity: 0.7;
+      min-height: 0;
+    }
+    .wake-indicator:empty { display: none; }
+    .wake-indicator.ok { color: #5e8f5a; }
+    .wake-indicator.warn { color: #b84a40; }
+
     @keyframes spin {
       to { transform: rotate(360deg); }
     }
@@ -299,6 +310,7 @@
     </div>
 
     <div class="status" id="status"></div>
+    <div class="wake-indicator" id="wakeIndicator"></div>
 
     <div class="file-list" id="fileList"></div>
 
@@ -342,15 +354,35 @@
 
     let wakeLock = null;
     let wakeLockWanted = false;
+    const wakeIndicator = document.getElementById('wakeIndicator');
+
+    function setWakeIndicator(text, cls) {
+      wakeIndicator.textContent = text;
+      wakeIndicator.className = 'wake-indicator' + (cls ? ' ' + cls : '');
+    }
 
     async function requestWakeLock() {
-      if (!('wakeLock' in navigator)) return;
+      if (!('wakeLock' in navigator)) {
+        setWakeIndicator('⚠ wake lock недоступен (нужен HTTPS)', 'warn');
+        return;
+      }
       try {
         wakeLock = await navigator.wakeLock.request('screen');
+        setWakeIndicator('wake lock активен — экран не погаснет', 'ok');
         wakeLock.addEventListener('release', () => {
-          if (wakeLockWanted) requestWakeLock();
+          wakeLock = null;
+          if (wakeLockWanted) {
+            setWakeIndicator('wake lock снят, переподключение…', 'warn');
+            requestWakeLock();
+          } else {
+            setWakeIndicator('', '');
+          }
         });
-      } catch {}
+      } catch (e) {
+        wakeLock = null;
+        setWakeIndicator('⚠ wake lock не получен: ' + (e && e.name ? e.name : e), 'warn');
+        console.warn('wakeLock request failed:', e);
+      }
     }
 
     function releaseWakeLock() {
@@ -360,6 +392,7 @@
         wakeLock.release().catch(() => {});
         wakeLock = null;
       }
+      setWakeIndicator('', '');
     }
 
     function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -610,10 +643,10 @@
     }
 
     async function uploadAll(files) {
+      wakeLockWanted = true;
+      requestWakeLock();           // before any await — preserve user-gesture context
       await loadMode();
       btn.disabled = true;
-      wakeLockWanted = true;
-      requestWakeLock();
       status.className = 'status loading';
       status.innerHTML = '<span class="spinner"></span>Загружаем файлы…';
       fileList.innerHTML = '';
