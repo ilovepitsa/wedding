@@ -23,7 +23,7 @@ func APIBase(mockBase string) string {
 }
 
 func GetUploadURL(apiBase, token, path string) (string, error) {
-	apiURL := apiBase + "/resources/upload?path=" + url.QueryEscape(path) + "&overwrite=false"
+	apiURL := apiBase + "/resources/upload?path=" + url.QueryEscape(path) + "&overwrite=true"
 
 	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {

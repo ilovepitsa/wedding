@@ -316,9 +316,24 @@
     const CHUNK_SIZE = 4 * 1024 * 1024;
     const MAX_CHUNK_RETRIES = 5;
     const CHUNK_BACKOFF = [1000, 2000, 4000, 8000, 16000];
-    const CHUNK_CONCURRENCY = 2;
+    const MAX_TOTAL_WORKERS = 6; // shared slot pool across all chunked uploads
     const MAX_SIMPLE_RETRIES = 3;
     const SIMPLE_BACKOFF = [1000, 3000];
+
+    // Semaphore leasing up to MAX_TOTAL_WORKERS slots across every active
+    // chunked upload. Files compete for the same pool, so as some finish the
+    // remaining ones naturally absorb the freed slots (e.g. 3 files → 2 each,
+    // 1 file left → all 6).
+    let _slots = MAX_TOTAL_WORKERS;
+    const _slotWaiters = [];
+    function acquireSlot() {
+      if (_slots > 0) { _slots--; return Promise.resolve(); }
+      return new Promise((r) => _slotWaiters.push(r));
+    }
+    function releaseSlot() {
+      if (_slotWaiters.length) _slotWaiters.shift()();
+      else _slots++;
+    }
 
     // upload mode is authoritative from the backend; baked window.UPLOAD_MODE
     // (injected at image build time) is only a fallback.
@@ -462,8 +477,10 @@
 
     async function uploadOne(file, ui) {
       ui.state.textContent = 'загрузка…';
+      const uploadId = uuid();
       const res = await retry(() =>
-        xhrSend('POST', '/api/upload?name=' + encodeURIComponent(file.name), file, (e) => {
+        xhrSend('POST', '/api/upload?name=' + encodeURIComponent(file.name) +
+          '&uploadId=' + uploadId, file, (e) => {
           if (e.lengthComputable) ui.bar.style.width = Math.round((e.loaded / e.total) * 100) + '%';
         }).then((r) => ({
           ok: r.ok,
@@ -526,41 +543,49 @@
         const queue = [];
         for (let i = 0; i < total; i++) if (!prog.received[i]) queue.push(i);
 
-        async function worker() {
-          while (queue.length) {
-            const idx = queue.shift();
-            if (prog.received[idx]) continue;
-            const offset = idx * CHUNK_SIZE;
-            const end = Math.min(offset + CHUNK_SIZE, file.size);
-            const blob = file.slice(offset, end);
-            const res = await retry(() =>
-              xhrSend('POST', '/api/upload/chunk?uploadId=' + prog.uploadId +
-                '&index=' + idx + '&offset=' + offset + '&total=' + total +
-                '&size=' + file.size + '&name=' + encodeURIComponent(file.name), blob).then((r) => ({
-                ok: r.ok,
-                retryable: r.networkError || r.status >= 500,
-                msg: r.ok ? null : extractError(r.body),
-              })), MAX_CHUNK_RETRIES, CHUNK_BACKOFF);
-            if (!res.ok) {
-              ui.row.classList.add('is-error');
-              ui.state.textContent = '✗ ' + (res.msg || 'ошибка');
-              ui.state.className = 'file-state error';
-              return false;
+        let failed = false;
+        const tasks = [];
+        while (queue.length && !failed) {
+          await acquireSlot();
+          if (failed) { releaseSlot(); break; }
+          const idx = queue.shift();
+          if (prog.received[idx]) { releaseSlot(); continue; }
+          const offset = idx * CHUNK_SIZE;
+          const end = Math.min(offset + CHUNK_SIZE, file.size);
+          const blob = file.slice(offset, end);
+          tasks.push((async () => {
+            try {
+              const res = await retry(() =>
+                xhrSend('POST', '/api/upload/chunk?uploadId=' + prog.uploadId +
+                  '&index=' + idx + '&offset=' + offset + '&total=' + total +
+                  '&size=' + file.size + '&name=' + encodeURIComponent(file.name), blob).then((r) => ({
+                    ok: r.ok,
+                    retryable: r.networkError || r.status >= 500,
+                    msg: r.ok ? null : extractError(r.body),
+                  })), MAX_CHUNK_RETRIES, CHUNK_BACKOFF);
+              if (!res.ok) {
+                failed = true;
+                ui.row.classList.add('is-error');
+                ui.state.textContent = '✗ ' + (res.msg || 'ошибка');
+                ui.state.className = 'file-state error';
+                return false;
+              }
+              prog.received[idx] = true;
+              doneCount++;
+              ui.bar.style.width = Math.round((doneCount / total) * 100) + '%';
+              ui.state.textContent = 'загрузка… ' + doneCount + '/' + total;
+              await idbPut(prog);
+              return true;
+            } finally {
+              releaseSlot();
             }
-            prog.received[idx] = true;
-            doneCount++;
-            ui.bar.style.width = Math.round((doneCount / total) * 100) + '%';
-            ui.state.textContent = 'загрузка… ' + doneCount + '/' + total;
-            await idbPut(prog);
-          }
-          return true;
+          })());
         }
+        const results = await Promise.all(tasks);
+        if (failed || !results.every(Boolean)) return false;
 
-        const results = await Promise.all(
-          Array.from({ length: Math.min(CHUNK_CONCURRENCY, total) }, worker)
-        );
-        if (!results.every(Boolean)) return false;
-
+        ui.state.textContent = 'финализация… загрузка на диск';
+        ui.state.className = 'file-state active';
         const cres = await retry(() =>
           xhrSend('POST', '/api/upload/complete?uploadId=' + prog.uploadId +
             '&name=' + encodeURIComponent(file.name), null).then((r) => ({

@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"time"
 
 	"wedding/internal/config"
 )
@@ -50,7 +49,7 @@ func SimpleHandler(cfg config.Config, ts TokenSource, dc DiskClient) http.Handle
 			}
 		}
 
-		filename := fmt.Sprintf("%d_%s", time.Now().UnixNano(), Sanitize(origName))
+		filename := fmt.Sprintf("%s_%s", Sanitize(r.URL.Query().Get("uploadId")), Sanitize(origName))
 		remotePath := cfg.YandexFolder + "/" + filename
 
 		uploadURL, err := dc.UploadURL(token, remotePath)
