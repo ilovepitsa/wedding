@@ -312,6 +312,34 @@
 
     const CONCURRENCY = 3;
 
+    let wakeLock = null;
+    let wakeLockWanted = false;
+
+    async function requestWakeLock() {
+      if (!('wakeLock' in navigator)) return;
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => {
+          if (wakeLockWanted) requestWakeLock();
+        });
+      } catch {}
+    }
+
+    function releaseWakeLock() {
+      wakeLockWanted = false;
+      if (wakeLock) {
+        wakeLock.removeEventListener('release', null);
+        wakeLock.release().catch(() => {});
+        wakeLock = null;
+      }
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && wakeLockWanted && !wakeLock) {
+        requestWakeLock();
+      }
+    });
+
     btn.addEventListener('click', () => input.click());
 
     input.addEventListener('change', () => {
@@ -380,6 +408,8 @@
 
     async function uploadAll(files) {
       btn.disabled = true;
+      wakeLockWanted = true;
+      requestWakeLock();
       status.className = 'status loading';
       status.innerHTML = '<span class="spinner"></span>Загружаем файлы…';
       fileList.innerHTML = '';
@@ -411,6 +441,7 @@
         status.textContent = 'Загружено ' + ok + ' из ' + jobs.length + ', не удалось: ' + failed;
       }
       btn.disabled = false;
+      releaseWakeLock();
     }
   </script>
 </body>

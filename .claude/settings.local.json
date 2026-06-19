@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(go build *)"
+      "Bash(go build *)",
+      "Bash(docker compose *)",
+      "Bash(curl -s -X POST \"http://localhost/api/upload?name=wake_lock_test.jpg\" -H \"Content-Type: image/jpeg\" --data-binary @/tmp/test.jpg -w \"\\\\nHTTP %{http_code}\\\\n\")"
     ]
   }
 }

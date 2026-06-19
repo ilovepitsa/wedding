@@ -32,7 +32,10 @@ func main() {
 		log.Fatalf("mkdir %s: %v", uploadsDir, err)
 	}
 
-	base := "http://localhost:" + port
+	base := os.Getenv("MOCK_BASE_URL")
+	if base == "" {
+		base = "http://localhost:" + port
+	}
 
 	mux := http.NewServeMux()
 
@@ -46,7 +49,17 @@ func main() {
 		remotePath := r.URL.Query().Get("path")
 		log.Printf("→ GET upload URL  path=%s", remotePath)
 
-		href := base + "/upload?path=" + url.QueryEscape(remotePath)
+		// Prefer the request Host so the href works inside docker networks
+		// where backend reaches mockdisk as http://mockdisk:9999.
+		selfBase := base
+		if r.Host != "" {
+			scheme := "http"
+			if r.TLS != nil {
+				scheme = "https"
+			}
+			selfBase = scheme + "://" + r.Host
+		}
+		href := selfBase + "/upload?path=" + url.QueryEscape(remotePath)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"href":      href,
