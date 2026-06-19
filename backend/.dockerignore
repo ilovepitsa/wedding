@@ -1,0 +1,5 @@
+uploads/
+logs/
+*.log
+tmp_uploads/
+*.exe

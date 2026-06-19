@@ -3,7 +3,14 @@
     "allow": [
       "Bash(go build *)",
       "Bash(docker compose *)",
-      "Bash(curl -s -X POST \"http://localhost/api/upload?name=wake_lock_test.jpg\" -H \"Content-Type: image/jpeg\" --data-binary @/tmp/test.jpg -w \"\\\\nHTTP %{http_code}\\\\n\")"
+      "Bash(curl -s -X POST \"http://localhost/api/upload?name=wake_lock_test.jpg\" -H \"Content-Type: image/jpeg\" --data-binary @/tmp/test.jpg -w \"\\\\nHTTP %{http_code}\\\\n\")",
+      "Bash(go vet *)",
+      "Bash(go test *)",
+      "Bash(UPLOAD_MODE=simple docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d)",
+      "Bash(curl -s http://localhost/api/config)",
+      "Bash(curl -s http://localhost/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" -X POST \"http://localhost/api/upload/chunk?uploadId=cccccccc-cccc-cccc-cccc-cccccccccccc&index=0&offset=0&total=1&size=1&name=x.jpg\" --data-binary \"x\")",
+      "Bash(curl -s -X POST \"http://localhost/api/upload?name=simple_test.jpg\" -H \"Content-Type: image/jpeg\" --data-binary @/tmp/test.jpg -w \"  HTTP %{http_code}\\\\n\")"
     ]
   }
 }

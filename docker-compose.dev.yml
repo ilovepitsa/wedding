@@ -12,5 +12,15 @@ services:
     environment:
       YANDEX_API_BASE: http://mockdisk:9999/v1/disk
       YANDEX_FOLDER: /wedding/photos
+      UPLOAD_MODE: chunked
+      UPLOAD_TMP_DIR: /app/tmp_uploads
+      UPLOAD_GC_TTL: 6h
+    volumes:
+      - ./tmp_uploads:/app/tmp_uploads
     depends_on:
       - mockdisk
+
+  frontend:
+    build:
+      args:
+        UPLOAD_MODE: chunked

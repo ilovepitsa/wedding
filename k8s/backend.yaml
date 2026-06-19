@@ -27,9 +27,17 @@ spec:
               value: /wedding/photos
             - name: LOG_FILE
               value: /app/logs/backend.log
+            - name: UPLOAD_MODE
+              value: simple
+            - name: UPLOAD_TMP_DIR
+              value: /app/tmp_uploads
+            - name: UPLOAD_GC_TTL
+              value: 6h
           volumeMounts:
             - name: logs
               mountPath: /app/logs
+            - name: tmp-uploads
+              mountPath: /app/tmp_uploads
           readinessProbe:
             httpGet:
               path: /health
@@ -51,6 +59,8 @@ spec:
               memory: 1200Mi
       volumes:
         - name: logs
+          emptyDir: {}
+        - name: tmp-uploads
           emptyDir: {}
 ---
 apiVersion: v1

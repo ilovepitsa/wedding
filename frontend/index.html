@@ -6,6 +6,7 @@
   <title>Поделитесь фото</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Lato:wght@300;400&display=swap" rel="stylesheet">
+  <!--UPLOAD_MODE-->
   <style>
     *, *::before, *::after {
       margin: 0;
@@ -311,6 +312,18 @@
     const fileList = document.getElementById('fileList');
 
     const CONCURRENCY = 3;
+    const CHUNK_THRESHOLD = 10 * 1024 * 1024;
+    const CHUNK_SIZE = 4 * 1024 * 1024;
+    const MAX_CHUNK_RETRIES = 5;
+    const CHUNK_BACKOFF = [1000, 2000, 4000, 8000, 16000];
+    const CHUNK_CONCURRENCY = 2;
+    const MAX_SIMPLE_RETRIES = 3;
+    const SIMPLE_BACKOFF = [1000, 3000];
+
+    // upload mode is authoritative from the backend; baked window.UPLOAD_MODE
+    // (injected at image build time) is only a fallback.
+    let MODE = window.UPLOAD_MODE || 'simple';
+    const activeJobs = new Set(); // in-flight chunked progress objects
 
     let wakeLock = null;
     let wakeLockWanted = false;
@@ -334,11 +347,91 @@
       }
     }
 
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && wakeLockWanted && !wakeLock) {
-        requestWakeLock();
+    function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+    function uuid() {
+      if (crypto.randomUUID) return crypto.randomUUID();
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+    }
+    function fileKey(file) { return file.name + ':' + file.size + ':' + file.lastModified; }
+    function extractError(body) {
+      try { return JSON.parse(body).error || 'ошибка'; } catch { return 'ошибка'; }
+    }
+
+    function xhrSend(method, url, body, onProgress) {
+      return new Promise((resolve) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open(method, url);
+        if (onProgress) xhr.upload.onprogress = onProgress;
+        xhr.onload = () => resolve({
+          status: xhr.status,
+          body: xhr.responseText,
+          ok: xhr.status >= 200 && xhr.status < 300,
+        });
+        xhr.onerror = () => resolve({ status: 0, ok: false, networkError: true });
+        xhr.send(body);
+      });
+    }
+
+    // fn(attempt) -> { ok, retryable, msg? }. Retries while retryable.
+    async function retry(fn, attempts, backoff) {
+      let last = { ok: false, retryable: false };
+      for (let a = 0; a <= attempts; a++) {
+        last = await fn(a);
+        if (last.ok || !last.retryable) return last;
+        if (a < attempts) await sleep(backoff[Math.min(a, backoff.length - 1)]);
       }
-    });
+      return last;
+    }
+
+    // --- IndexedDB: persists chunked-upload progress across reloads ---
+    function idbOpen() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open('wedding_uploads', 1);
+        req.onupgradeneeded = () => req.result.createObjectStore('chunks', { keyPath: 'key' });
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+    let idbPromise = null;
+    function idb() { if (!idbPromise) idbPromise = idbOpen().catch(() => null); return idbPromise; }
+    async function idbGet(key) {
+      const db = await idb(); if (!db) return null;
+      return new Promise((resolve) => {
+        const tx = db.transaction('chunks', 'readonly');
+        const r = tx.objectStore('chunks').get(key);
+        r.onsuccess = () => resolve(r.result || null);
+        r.onerror = () => resolve(null);
+      });
+    }
+    async function idbPut(val) {
+      const db = await idb(); if (!db) return;
+      return new Promise((resolve) => {
+        const tx = db.transaction('chunks', 'readwrite');
+        tx.objectStore('chunks').put(val);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    }
+    async function idbClear(key) {
+      const db = await idb(); if (!db) return;
+      return new Promise((resolve) => {
+        const tx = db.transaction('chunks', 'readwrite');
+        tx.objectStore('chunks').delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    }
+
+    async function loadMode() {
+      try {
+        const r = await fetch('/api/config');
+        if (r.ok) { const j = await r.json(); if (j.uploadMode) MODE = j.uploadMode; }
+      } catch {}
+    }
 
     btn.addEventListener('click', () => input.click());
 
@@ -367,46 +460,132 @@
       };
     }
 
-    function uploadOne(file, ui) {
-      return new Promise((resolve) => {
+    async function uploadOne(file, ui) {
+      ui.state.textContent = 'загрузка…';
+      const res = await retry(() =>
+        xhrSend('POST', '/api/upload?name=' + encodeURIComponent(file.name), file, (e) => {
+          if (e.lengthComputable) ui.bar.style.width = Math.round((e.loaded / e.total) * 100) + '%';
+        }).then((r) => ({
+          ok: r.ok,
+          retryable: r.networkError || r.status >= 500,
+          msg: r.ok ? null : extractError(r.body),
+        })), MAX_SIMPLE_RETRIES, SIMPLE_BACKOFF);
+
+      if (res.ok) {
+        ui.bar.style.width = '100%';
+        ui.state.textContent = '✓ готово';
+        ui.state.className = 'file-state success';
+        return true;
+      }
+      ui.row.classList.add('is-error');
+      ui.state.textContent = '✗ ' + (res.msg || (res.networkError ? 'нет соединения' : 'ошибка'));
+      ui.state.className = 'file-state error';
+      return false;
+    }
+
+    async function syncStatus(prog) {
+      const r = await xhrSend('GET', '/api/upload/status?uploadId=' + prog.uploadId);
+      if (!r.ok) {
+        // server lost the upload → start over with a fresh id
+        prog.uploadId = uuid();
+        prog.received = new Array(prog.total).fill(false);
+        await idbPut(prog);
+        return;
+      }
+      try {
+        const j = JSON.parse(r.body);
+        if (j.total !== prog.total) {
+          prog.uploadId = uuid();
+          prog.received = new Array(prog.total).fill(false);
+          await idbPut(prog);
+          return;
+        }
+        const set = new Set(j.received || []);
+        for (let i = 0; i < prog.total; i++) prog.received[i] = set.has(i);
+        await idbPut(prog);
+      } catch {}
+    }
+
+    async function uploadOneChunked(file, ui) {
+      const total = Math.ceil(file.size / CHUNK_SIZE);
+      let prog = await idbGet(fileKey(file));
+      if (!prog || prog.size !== file.size || prog.lastModified !== file.lastModified) {
+        prog = {
+          key: fileKey(file), uploadId: uuid(), name: file.name,
+          size: file.size, lastModified: file.lastModified,
+          total, received: new Array(total).fill(false),
+        };
+        await idbPut(prog);
+      }
+      activeJobs.add(prog);
+      try {
+        await syncStatus(prog);
         ui.state.textContent = 'загрузка…';
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/upload?name=' + encodeURIComponent(file.name));
-        if (file.type) xhr.setRequestHeader('Content-Type', file.type);
+        let doneCount = prog.received.filter(Boolean).length;
 
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            ui.bar.style.width = Math.round((e.loaded / e.total) * 100) + '%';
-          }
-        };
+        const queue = [];
+        for (let i = 0; i < total; i++) if (!prog.received[i]) queue.push(i);
 
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            ui.bar.style.width = '100%';
-            ui.state.textContent = '✓ готово';
-            ui.state.className = 'file-state success';
-            resolve(true);
-          } else {
-            let msg = 'ошибка';
-            try { msg = JSON.parse(xhr.responseText).error || msg; } catch {}
-            ui.row.classList.add('is-error');
-            ui.state.textContent = '✗ ' + msg;
-            ui.state.className = 'file-state error';
-            resolve(false);
+        async function worker() {
+          while (queue.length) {
+            const idx = queue.shift();
+            if (prog.received[idx]) continue;
+            const offset = idx * CHUNK_SIZE;
+            const end = Math.min(offset + CHUNK_SIZE, file.size);
+            const blob = file.slice(offset, end);
+            const res = await retry(() =>
+              xhrSend('POST', '/api/upload/chunk?uploadId=' + prog.uploadId +
+                '&index=' + idx + '&offset=' + offset + '&total=' + total +
+                '&size=' + file.size + '&name=' + encodeURIComponent(file.name), blob).then((r) => ({
+                ok: r.ok,
+                retryable: r.networkError || r.status >= 500,
+                msg: r.ok ? null : extractError(r.body),
+              })), MAX_CHUNK_RETRIES, CHUNK_BACKOFF);
+            if (!res.ok) {
+              ui.row.classList.add('is-error');
+              ui.state.textContent = '✗ ' + (res.msg || 'ошибка');
+              ui.state.className = 'file-state error';
+              return false;
+            }
+            prog.received[idx] = true;
+            doneCount++;
+            ui.bar.style.width = Math.round((doneCount / total) * 100) + '%';
+            ui.state.textContent = 'загрузка… ' + doneCount + '/' + total;
+            await idbPut(prog);
           }
-        };
-        xhr.onerror = () => {
+          return true;
+        }
+
+        const results = await Promise.all(
+          Array.from({ length: Math.min(CHUNK_CONCURRENCY, total) }, worker)
+        );
+        if (!results.every(Boolean)) return false;
+
+        const cres = await retry(() =>
+          xhrSend('POST', '/api/upload/complete?uploadId=' + prog.uploadId +
+            '&name=' + encodeURIComponent(file.name), null).then((r) => ({
+            ok: r.ok,
+            retryable: r.networkError || r.status >= 500,
+            msg: r.ok ? null : extractError(r.body),
+          })), MAX_CHUNK_RETRIES, CHUNK_BACKOFF);
+        if (!cres.ok) {
           ui.row.classList.add('is-error');
-          ui.state.textContent = '✗ нет соединения';
+          ui.state.textContent = '✗ ' + (cres.msg || 'ошибка');
           ui.state.className = 'file-state error';
-          resolve(false);
-        };
-
-        xhr.send(file);
-      });
+          return false;
+        }
+        ui.bar.style.width = '100%';
+        ui.state.textContent = '✓ готово';
+        ui.state.className = 'file-state success';
+        await idbClear(fileKey(file));
+        return true;
+      } finally {
+        activeJobs.delete(prog);
+      }
     }
 
     async function uploadAll(files) {
+      await loadMode();
       btn.disabled = true;
       wakeLockWanted = true;
       requestWakeLock();
@@ -421,7 +600,10 @@
       async function worker() {
         while (queue.length) {
           const job = queue.shift();
-          const success = await uploadOne(job.file, job.ui);
+          const useChunked = MODE === 'chunked' && job.file.size > CHUNK_THRESHOLD;
+          const success = useChunked
+            ? await uploadOneChunked(job.file, job.ui)
+            : await uploadOne(job.file, job.ui);
           done++;
           if (success) ok++;
           status.innerHTML = '<span class="spinner"></span>Загружено ' + done + ' из ' + jobs.length + '…';
@@ -443,6 +625,15 @@
       btn.disabled = false;
       releaseWakeLock();
     }
+
+    // Resume: on return to the tab or reconnect, re-sync in-flight chunked uploads.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && wakeLockWanted && !wakeLock) requestWakeLock();
+      if (document.visibilityState === 'visible') activeJobs.forEach((p) => syncStatus(p));
+    });
+    window.addEventListener('online', () => activeJobs.forEach((p) => syncStatus(p)));
+
+    loadMode();
   </script>
 </body>
 </html>

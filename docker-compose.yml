@@ -1,13 +1,21 @@
 services:
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        UPLOAD_MODE: ${UPLOAD_MODE:-simple}
     env_file: .env
+    environment:
+      UPLOAD_MODE: ${UPLOAD_MODE:-simple}
     restart: unless-stopped
     expose:
       - "8080"
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        UPLOAD_MODE: ${UPLOAD_MODE:-simple}
     restart: unless-stopped
     ports:
       - "80:80"

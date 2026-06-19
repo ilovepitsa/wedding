@@ -1,7 +1,6 @@
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
-COPY go.mod .
-COPY mockdisk/main.go ./mockdisk/main.go
+COPY . .
 RUN go build -ldflags="-s -w" -o mockdisk ./mockdisk
 
 FROM alpine:latest
