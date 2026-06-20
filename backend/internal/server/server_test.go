@@ -116,6 +116,26 @@ func listDir(t *testing.T, dir string) []string {
 	return names
 }
 
+// waitForFile polls dir until at least one file appears or the timeout elapses.
+// The shipper offloads to Yandex (mockdisk) asynchronously, so the assembled
+// file lands in uploads/ a few milliseconds after /complete returns 200.
+func waitForFile(t *testing.T, dir string, timeout time.Duration) []string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if entries, _ := os.ReadDir(dir); len(entries) > 0 {
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			return names
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for file in %s", dir)
+	return nil
+}
+
 func readFile(t *testing.T, path string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -196,7 +216,7 @@ func TestChunkedUploadEndToEnd(t *testing.T) {
 		t.Fatalf("complete: %d %s", resp.StatusCode, readBody(t, resp))
 	}
 
-	files := listDir(t, h.uploads)
+	files := waitForFile(t, h.uploads, 5*time.Second)
 	if len(files) != 1 {
 		t.Fatalf("expected 1 assembled file, got %v", files)
 	}
@@ -204,7 +224,7 @@ func TestChunkedUploadEndToEnd(t *testing.T) {
 		t.Fatal("assembled content mismatch")
 	}
 
-	// temp dir cleaned up immediately on success
+	// temp dir cleaned up immediately on successful ship
 	if entries, _ := os.ReadDir(h.tmpUpload); len(entries) != 0 {
 		t.Fatalf("temp dir not cleaned: %v", entries)
 	}
@@ -301,12 +321,44 @@ func TestChunkedResumeAcrossRestart(t *testing.T) {
 		t.Fatalf("complete: %d %s", resp.StatusCode, readBody(t, resp))
 	}
 
-	files := listDir(t, uploads)
+	files := waitForFile(t, uploads, 5*time.Second)
 	if len(files) != 1 {
 		t.Fatalf("expected 1 file, got %v", files)
 	}
 	if !bytes.Equal(readFile(t, filepath.Join(uploads, files[0])), data) {
 		t.Fatal("assembled content mismatch after resume")
+	}
+}
+
+func TestCompleteIdempotentAsync(t *testing.T) {
+	h := newHarness(t, "chunked", 6*time.Hour)
+	uid := "99999999-9999-9999-9999-999999999999"
+	data := fakeJPEG(1500)
+	const total = 2
+	for i := 0; i < total; i++ {
+		off := i * 1000
+		end := off + 1000
+		if end > len(data) {
+			end = len(data)
+		}
+		resp := h.post(fmt.Sprintf("/api/upload/chunk?uploadId=%s&index=%d&offset=%d&total=%d&size=%d&name=test.jpg",
+			uid, i, off, total, len(data)), data[off:end])
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("chunk %d: %d", i, resp.StatusCode)
+		}
+	}
+
+	// Call complete twice — second must be a no-op (already queued).
+	for i := 0; i < 2; i++ {
+		resp := h.post("/api/upload/complete?uploadId="+uid+"&name=test.jpg", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("complete %d: %d %s", i, resp.StatusCode, readBody(t, resp))
+		}
+	}
+
+	files := waitForFile(t, h.uploads, 5*time.Second)
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file (idempotent), got %v", files)
 	}
 }
 

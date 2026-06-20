@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -11,6 +12,7 @@ type Config struct {
 	UploadMode         string
 	UploadTmpDir       string
 	UploadGCTTL        time.Duration
+	UploadShipWorkers  int
 	YandexAPIBase      string
 	YandexFolder       string
 	LogFile            string
@@ -25,6 +27,7 @@ func Load() Config {
 		UploadMode:         strings.ToLower(getEnv("UPLOAD_MODE", "simple")),
 		UploadTmpDir:       getEnv("UPLOAD_TMP_DIR", "/app/tmp_uploads"),
 		UploadGCTTL:        getDuration("UPLOAD_GC_TTL", 6*time.Hour),
+		UploadShipWorkers:  getInt("UPLOAD_SHIP_WORKERS", 2),
 		YandexAPIBase:      os.Getenv("YANDEX_API_BASE"),
 		YandexFolder:       strings.TrimRight(getEnv("YANDEX_FOLDER", "/wedding/photos"), "/"),
 		LogFile:            getEnv("LOG_FILE", "/app/logs/backend.log"),
@@ -34,6 +37,9 @@ func Load() Config {
 	}
 	if c.UploadMode != "simple" && c.UploadMode != "chunked" {
 		c.UploadMode = "simple"
+	}
+	if c.UploadShipWorkers < 1 {
+		c.UploadShipWorkers = 1
 	}
 	return c
 }
@@ -51,6 +57,15 @@ func getDuration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return def
+}
+
+func getInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
 	return def

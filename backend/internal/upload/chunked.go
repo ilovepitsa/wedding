@@ -1,23 +1,20 @@
 package upload
 
 import (
-	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
-
-	"wedding/internal/config"
 )
 
 const maxChunkSize = 5 << 20 // 5 MiB hard cap (chunk size is 4 MiB)
 
-// RegisterChunked wires the chunked upload endpoints onto mux.
-func RegisterChunked(mux *http.ServeMux, cfg config.Config, ts TokenSource, dc DiskClient, up *ChunkUploader) {
+// RegisterChunked wires the chunked upload endpoints onto mux. The shipper
+// (cfg/ts/dc) lives inside the ChunkUploader now; complete just enqueues.
+func RegisterChunked(mux *http.ServeMux, up *ChunkUploader) {
 	mux.HandleFunc("/api/upload/chunk", ChunkHandler(up))
 	mux.HandleFunc("/api/upload/status", StatusHandler(up))
-	mux.HandleFunc("/api/upload/complete", CompleteHandler(cfg, ts, dc, up))
+	mux.HandleFunc("/api/upload/complete", CompleteHandler(up))
 }
 
 func ChunkHandler(up *ChunkUploader) http.HandlerFunc {
@@ -55,6 +52,9 @@ func ChunkHandler(up *ChunkUploader) http.HandlerFunc {
 		}
 
 		received, _, total, _ := up.Status(id)
+		if len(received) == total {
+			log.Printf("chunks complete: %s — все %d чанков получены, жду /complete", id, total)
+		}
 		JSONOK(w, map[string]any{"received": len(received), "total": total})
 	}
 }
@@ -79,17 +79,17 @@ func StatusHandler(up *ChunkUploader) http.HandlerFunc {
 	}
 }
 
-func CompleteHandler(cfg config.Config, ts TokenSource, dc DiskClient, up *ChunkUploader) http.HandlerFunc {
+func CompleteHandler(up *ChunkUploader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		id := r.URL.Query().Get("uploadId")
-		name := r.URL.Query().Get("name")
 
-		dataPath, size, mime, _, err := up.DataFile(id)
-		if err != nil {
+		// Distinguish "incomplete" (409) from "missing" (404): MarkShipping
+		// returns false for both, so probe DataFile first for the status code.
+		if _, _, _, _, err := up.DataFile(id); err != nil {
 			if err.Error() == "upload incomplete" {
 				JSONError(w, "Загрузка неполна", http.StatusConflict)
 				return
@@ -98,40 +98,11 @@ func CompleteHandler(cfg config.Config, ts TokenSource, dc DiskClient, up *Chunk
 			return
 		}
 
-		var token string
-		if ts != nil {
-			token, err = ts.Token()
-			if err != nil {
-				JSONError(w, "Сервис временно недоступен: "+err.Error(), http.StatusServiceUnavailable)
-				return
-			}
-		}
-
-		filename := fmt.Sprintf("%s_%s", id, Sanitize(name))
-		remotePath := cfg.YandexFolder + "/" + filename
-
-		uploadURL, err := dc.UploadURL(token, remotePath)
-		if err != nil {
-			log.Printf("yd upload url: %v", err)
-			JSONError(w, "Ошибка запроса URL для загрузки", http.StatusBadGateway)
+		if up.MarkShipping(id) {
+			log.Printf("complete %s: поставлен в очередь на отгрузку в Диск", id)
+			JSONOK(w, map[string]string{"status": "ok"})
 			return
 		}
-
-		f, err := os.Open(dataPath)
-		if err != nil {
-			JSONError(w, "Ошибка чтения файла", http.StatusInternalServerError)
-			return
-		}
-		defer f.Close()
-
-		if err := dc.Put(uploadURL, f, size, mime); err != nil {
-			log.Printf("yd put: %v", err)
-			JSONError(w, "Ошибка загрузки на Яндекс.Диск", http.StatusBadGateway)
-			return
-		}
-
-		up.Remove(id)
-		log.Printf("uploaded %s (%d bytes, chunked)", remotePath, size)
-		JSONOK(w, map[string]string{"status": "ok"})
+		JSONError(w, "Не удалось поставить в очередь", http.StatusInternalServerError)
 	}
 }

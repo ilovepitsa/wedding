@@ -45,9 +45,9 @@ func build(cfg config.Config) (http.Handler, *upload.ChunkUploader) {
 
 	var uploader *upload.ChunkUploader
 	if cfg.UploadMode == "chunked" {
-		uploader = upload.NewChunkUploader(cfg.UploadTmpDir, cfg.UploadGCTTL)
+		uploader = upload.NewChunkUploader(cfg.UploadTmpDir, cfg.UploadGCTTL, cfg, ts, dc, cfg.UploadShipWorkers)
 		go uploader.GCLoop(context.Background())
-		upload.RegisterChunked(mux, cfg, ts, dc, uploader)
+		upload.RegisterChunked(mux, uploader)
 	}
 	return mux, uploader
 }

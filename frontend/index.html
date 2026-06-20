@@ -617,8 +617,8 @@
         const results = await Promise.all(tasks);
         if (failed || !results.every(Boolean)) return false;
 
-        ui.state.textContent = 'финализация… загрузка на диск';
-        ui.state.className = 'file-state active';
+        // /complete now just enqueues async offload to Yandex Disk and
+        // returns immediately — no need for a "finalizing" state.
         const cres = await retry(() =>
           xhrSend('POST', '/api/upload/complete?uploadId=' + prog.uploadId +
             '&name=' + encodeURIComponent(file.name), null).then((r) => ({

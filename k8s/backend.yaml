@@ -33,6 +33,8 @@ spec:
               value: /app/tmp_uploads
             - name: UPLOAD_GC_TTL
               value: 6h
+            - name: UPLOAD_SHIP_WORKERS
+              value: "6"
           volumeMounts:
             - name: logs
               mountPath: /app/logs
